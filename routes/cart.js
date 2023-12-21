@@ -1,89 +1,119 @@
 var express = require("express");
 var router = express.Router();
-const { handleError } = require("../utils");
-var { users } = require("../db");
-const crypto = require("crypto");
-const jwt = require("jsonwebtoken");
-const config = require("../config.json");
+const { handleError, verifyAuth, getProduct } = require("../utils");
+var { users, products } = require("../db");
 
-router.post("/register", (req, res) => {
-  console.log(`GET request to "/auth/register" received for user}`);
+// Cart Controller
+router.get("/", verifyAuth, (req, res) => {
+  console.log(`GET request to "/cart" received`);
 
-  users.findOne({ username: req.body.username }, (err, user) => {
+  return res.status(200).json(req.user.cart);
+});
+
+router.post("/", verifyAuth, async (req, res) => {
+  console.log(`POST request to "/cart" received`);
+
+  products.findOne({ _id: req.body.productId }, async (err, product) => {
     if (err) {
       return handleError(res, err);
     }
-    if (user) {
-      return res.status(400).json({
-        success: false,
-        message: "Username already exists",
-      });
+    if (!product) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Product doesn't exist" });
     }
-    // if (req.body.username.length < 6 || req.body.username.length > 32) {
-    //     return res.status(400).json({
-    //         success: false,
-    //         message:
-    //             'Username must be between 6 and 32 characters in length'
-    //     });
-    // }
-    // if (req.body.password.length < 6 || req.body.password.length > 32) {
-    //     return res.status(400).json({
-    //         success: false,
-    //         message:
-    //             'Password must be between 6 and 32 characters in length'
-    //     });
-    // }
-    users.insert({
-      username: req.body.username,
-      password: sha256(req.body.password),
-      balance: 5000,
-      cart: [],
-      addresses: [],
+
+    const index = await req.user.cart.findIndex(
+      (element) => element.productId === req.body.productId
+    );
+
+    if (index === -1) {
+      req.user.cart.push({
+        productId: req.body.productId,
+        qty: req.body.qty,
+      });
+    } else if (req.body.qty === 0) {
+      // delete
+      req.user.cart.splice(index, 1);
+    } else {
+      //modify
+      req.user.cart[index].qty = req.body.qty;
+    }
+    users.update(
+      { _id: req.user._id },
+      { $set: { cart: req.user.cart } },
+      {},
+      (err) => {
+        if (err) {
+          handleError(res, err);
+        }
+
+        console.log(
+          `User ${req.user.username}'s cart updated to`,
+          req.user.cart
+        );
+
+        return res.status(200).json(req.user.cart);
+      }
+    );
+  });
+});
+
+router.post("/checkout", verifyAuth, async (req, res) => {
+  console.log(
+    `POST request received to "/cart/checkout": ${req.user.username}`
+  );
+
+  let total = 0;
+  for (let element of req.user.cart) {
+    try {
+      const product = await getProduct(element.productId);
+      if (product == null) {
+        throw new Error("Invalid product in cart. ");
+      }
+      total = total + element.qty * product.cost;
+    } catch (error) {
+      handleError(res, error);
+    }
+  }
+  if (total === 0) {
+    return res.status(400).json({ success: false, message: "Cart is empty" });
+  }
+  if (req.user.balance < total) {
+    return res.status(400).json({
+      success: false,
+      message: "Wallet balance not sufficient to place order",
     });
-
-    console.log(`Registered user: ${req.body.username}`);
-
-    return res.status(201).json({
+  }
+  if (!req.body.addressId) {
+    return res.status(400).json({
+      success: false,
+      message: "Address not set",
+    });
+  }
+  const addressIndex = await req.user.addresses.findIndex(
+    (element) => element._id === req.body.addressId
+  );
+  if (addressIndex === -1) {
+    return res
+      .status(404)
+      .json({ success: false, message: "Bad address specified" });
+  }
+  req.user.balance -= total;
+  console.log("Mock order placed");
+  console.log("Cart", req.user.cart);
+  console.log("Total cost", total);
+  console.log("Address", req.user.addresses[addressIndex]);
+  // Now clear cart
+  req.user.cart = [];
+  users.update({ _id: req.user._id }, req.user, {}, (err) => {
+    if (err) {
+      handleError(res, err);
+    }
+    return res.status(200).json({
       success: true,
     });
   });
 });
-
-router.post("/login", (req, res) => {
-  console.log(`POST request to "/auth/login" received`);
-
-  users.findOne({ username: req.body.username }, (err, user) => {
-    if (err) {
-      return handleError(res, err);
-    }
-    if (!user) {
-      return res.status(400).json({
-        success: false,
-        message: "Username does not exist",
-      });
-    }
-    if (user.password !== sha256(req.body.password)) {
-      return res.status(400).json({
-        success: false,
-        message: "Password is incorrect",
-      });
-    }
-    const token = jwt.sign({ username: user.username }, config.jwtSecret, {
-      expiresIn: "6h",
-    });
-
-    console.log(`Logged in as user: ${req.body.username}`);
-
-    return res.status(201).json({
-      success: true,
-      token: token,
-      username: user.username,
-      balance: user.balance,
-    });
-  });
-});
-
-const sha256 = (input) =>
-  crypto.createHash("sha256").update(input, "utf8").digest("hex");
 
 module.exports = router;
